@@ -329,10 +329,11 @@ def reduceNight(directory, write_flat=True, write_bkg=True, \
         #use bpm here
         daofind = DAOStarFinder(fwhm=8, threshold=10 * std)
         sources = daofind(target_imgs[0], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
-        # sources = sources[sources['mag'] < -2]
         # Ignore sources too close to edge
         sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
                           (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
+        # Ignore very faint sources that are likely just noise
+        # sources = sources[sources['mag'] < -2]
         max_source = sources.iloc[0]
         ref_x, ref_y = max_source.xcentroid, max_source.ycentroid
         # plt.figure()
