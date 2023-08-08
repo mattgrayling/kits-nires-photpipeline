@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import scipy
+import image_registration
 
 mpl.use('macosx')
 from astropy.io import fits
@@ -233,6 +234,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True, \
             continue  # as in quit the loop and continue
         # if target != '2023dbc':
         #     continue
+        if target == '13232490+444059':
+            continue
         print("Processing ", target)
         target_inds = all_targets == target
         # extra_target_inds = all_targets == f'{target}_S1'
@@ -298,6 +301,35 @@ def reduceNight(directory, write_flat=True, write_bkg=True, \
 
         # ##########FINE ALIGNMENT FROM OLD SCRIPT###################
 
+        align_images = target_imgs.copy()
+        align_images[align_images < 0] = 0
+
+        mean, median, std = sigma_clipped_stats(target_imgs[0][~bpm])
+        #use bpm here
+        daofind = DAOStarFinder(fwhm=10, threshold=5 * std)
+        sources = daofind(target_imgs[0], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
+        # Ignore sources too close to edge
+        sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
+                          (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
+        ref_x, ref_y = int(sources.iloc[0].xcentroid), int(sources.iloc[0].ycentroid)
+
+        for i in range(phot_imgs.shape[0]):
+            xshift, yshift = image_registration.cross_correlation_shifts(align_images[0][ref_y - 50: ref_y + 50, ref_x - 50: ref_x + 50],
+                                                                     align_images[i][ref_y - 50: ref_y + 50, ref_x - 50: ref_x + 50])
+            x_scale, y_scale = -1, -1
+            cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
+            target_heads[i]['CRVAL1'] = target_heads[0]['CRVAL1'] + (
+                        xshift * target_heads[0]['CD1_1'] * x_scale + yshift * target_heads[0][
+                    'CD1_2'] * y_scale) / cosdec
+            target_heads[i]['CRVAL2'] = target_heads[0]['CRVAL2'] + xshift * target_heads[0][
+                'CD2_1'] * x_scale + yshift * target_heads[0]['CD2_2'] * y_scale
+        #     print(xshift, yshift)
+        #     plt.figure()
+        #     plt.imshow(align_images[0], vmin=0, vmax=200)
+        #     plt.figure()
+        #     plt.imshow(align_images[i], vmin=0, vmax=200)
+        # plt.show()
+
         # # Image shift using cross-correlations-------------------------------
         # # Remove negative sources, just for cross-correlation
         # align_images = target_imgs.copy()
@@ -322,72 +354,72 @@ def reduceNight(directory, write_flat=True, write_bkg=True, \
         # Image shift using reference source-----------------------------
 
         # # Find reference sources in first image
-        try:
-            mean, median, std = sigma_clipped_stats(target_imgs[0][~bpm])
-
-            #use bpm here
-            daofind = DAOStarFinder(fwhm=10, threshold=5 * std)
-            sources = daofind(target_imgs[0], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
-            print(sources.shape)
-            # Ignore sources too close to edge
-            sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
-                              (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
-            # Ignore very faint sources that are likely just noise
-            ref_sources = sources[sources['mag'] < -2]
-            max_source = ref_sources.iloc[0]
-            N_sources = ref_sources.shape[0]
-            # plt.figure()
-            # positions = np.transpose((ref_sources['xcentroid'], ref_sources['ycentroid']))
-            # apertures = CircularAperture(positions, r=8.0)
-            # plt.imshow(target_imgs[0], cmap='gray', vmin=-50, vmax=500)
-            # apertures.plot(color='blue', lw=2.5, alpha=0.5)
-            # Find x/y shifts
-            ref_lists = []
-            for i in range(phot_imgs.shape[0]):
-                mean, median, std = sigma_clipped_stats(target_imgs[i][~bpm])
-                daofind = DAOStarFinder(fwhm=10, threshold=5*std)
-                sources = daofind(target_imgs[i], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
-                search_rad = 30
-                ref_list = []
-                for j in range(N_sources):
-                    xc, yc = ref_sources.iloc[j].xcentroid, ref_sources.iloc[j].ycentroid
-                    ref_mag = ref_sources.iloc[j].mag
-                    local_sources = sources.copy()
-                    local_sources['sep'] = np.sqrt(
-                        (local_sources.xcentroid - xc) ** 2 + (local_sources.ycentroid - yc) ** 2)
-                    local_sources = local_sources.sort_values(by='sep')
-                    positions = np.transpose((local_sources['xcentroid'], local_sources['ycentroid']))
-                    apertures = CircularAperture(positions, r=8.0)
-                    plt.imshow(target_imgs[0], cmap='gray', vmin=-50, vmax=500)
-                    apertures.plot(color='blue', lw=2.5, alpha=0.5)
-                    local_sources = local_sources[local_sources.mag < ref_mag + 2] # Don't select things much fainter than reference source
-                    local_sources['sep'] = np.sqrt((local_sources.xcentroid - xc) ** 2 + (local_sources.ycentroid - yc) ** 2)
-                    local_sources = local_sources[local_sources['sep'] < search_rad]
-                    local_sources = local_sources.sort_values(by='sep')
-                    if local_sources.empty:
-                        ref_list.append([])
-                    else:
-                        ref_list.append([local_sources.iloc[0].xcentroid, local_sources.iloc[0].ycentroid])
-                ref_lists.append(ref_list)
-            for i in range(phot_imgs.shape[0]):
-                ref_list = ref_lists[i]
-                x_shifts, y_shifts = [], []
-                for j in range(N_sources):
-                    refs = ref_list[j]
-                    if len(refs) == 0:
-                        continue
-                    x_shifts.append(ref_sources.iloc[j].xcentroid - refs[0])
-                    y_shifts.append(ref_sources.iloc[j].ycentroid - refs[1])
-                x_shift, y_shift = np.median(x_shifts), np.median(y_shifts)
-                print(x_shifts, y_shifts)
-                x_scale, y_scale = 1, 1
-                cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
-                target_heads[i]['CRVAL1'] = target_heads[0]['CRVAL1'] + (x_shift * target_heads[0]['CD1_1'] * x_scale + y_shift * target_heads[0]['CD1_2'] * y_scale) / cosdec
-                target_heads[i]['CRVAL2'] = target_heads[0]['CRVAL2'] + x_shift * target_heads[0]['CD2_1'] * x_scale + y_shift * target_heads[0]['CD2_2'] * y_scale
-                # Save intermediate images
-        except:
-            print("Fine alignment fails. Probably no sources found! Skipping for now")
-            continue
+        # try:
+        #     mean, median, std = sigma_clipped_stats(target_imgs[0][~bpm])
+        #
+        #     #use bpm here
+        #     daofind = DAOStarFinder(fwhm=10, threshold=5 * std)
+        #     sources = daofind(target_imgs[0], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
+        #     print(sources.shape)
+        #     # Ignore sources too close to edge
+        #     sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
+        #                       (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
+        #     # Ignore very faint sources that are likely just noise
+        #     ref_sources = sources[sources['mag'] < -2]
+        #     max_source = ref_sources.iloc[0]
+        #     N_sources = ref_sources.shape[0]
+        #     # plt.figure()
+        #     # positions = np.transpose((ref_sources['xcentroid'], ref_sources['ycentroid']))
+        #     # apertures = CircularAperture(positions, r=8.0)
+        #     # plt.imshow(target_imgs[0], cmap='gray', vmin=-50, vmax=500)
+        #     # apertures.plot(color='blue', lw=2.5, alpha=0.5)
+        #     # Find x/y shifts
+        #     ref_lists = []
+        #     for i in range(phot_imgs.shape[0]):
+        #         mean, median, std = sigma_clipped_stats(target_imgs[i][~bpm])
+        #         daofind = DAOStarFinder(fwhm=10, threshold=5*std)
+        #         sources = daofind(target_imgs[i], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
+        #         search_rad = 30
+        #         ref_list = []
+        #         for j in range(N_sources):
+        #             xc, yc = ref_sources.iloc[j].xcentroid, ref_sources.iloc[j].ycentroid
+        #             ref_mag = ref_sources.iloc[j].mag
+        #             local_sources = sources.copy()
+        #             local_sources['sep'] = np.sqrt(
+        #                 (local_sources.xcentroid - xc) ** 2 + (local_sources.ycentroid - yc) ** 2)
+        #             local_sources = local_sources.sort_values(by='sep')
+        #             positions = np.transpose((local_sources['xcentroid'], local_sources['ycentroid']))
+        #             apertures = CircularAperture(positions, r=8.0)
+        #             plt.imshow(target_imgs[0], cmap='gray', vmin=-50, vmax=500)
+        #             apertures.plot(color='blue', lw=2.5, alpha=0.5)
+        #             local_sources = local_sources[local_sources.mag < ref_mag + 2] # Don't select things much fainter than reference source
+        #             local_sources['sep'] = np.sqrt((local_sources.xcentroid - xc) ** 2 + (local_sources.ycentroid - yc) ** 2)
+        #             local_sources = local_sources[local_sources['sep'] < search_rad]
+        #             local_sources = local_sources.sort_values(by='sep')
+        #             if local_sources.empty:
+        #                 ref_list.append([])
+        #             else:
+        #                 ref_list.append([local_sources.iloc[0].xcentroid, local_sources.iloc[0].ycentroid])
+        #         ref_lists.append(ref_list)
+        #     for i in range(phot_imgs.shape[0]):
+        #         ref_list = ref_lists[i]
+        #         x_shifts, y_shifts = [], []
+        #         for j in range(N_sources):
+        #             refs = ref_list[j]
+        #             if len(refs) == 0:
+        #                 continue
+        #             x_shifts.append(ref_sources.iloc[j].xcentroid - refs[0])
+        #             y_shifts.append(ref_sources.iloc[j].ycentroid - refs[1])
+        #         x_shift, y_shift = np.median(x_shifts), np.median(y_shifts)
+        #         print(x_shifts, y_shifts)
+        #         x_scale, y_scale = 1, 1
+        #         cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
+        #         target_heads[i]['CRVAL1'] = target_heads[0]['CRVAL1'] + (x_shift * target_heads[0]['CD1_1'] * x_scale + y_shift * target_heads[0]['CD1_2'] * y_scale) / cosdec
+        #         target_heads[i]['CRVAL2'] = target_heads[0]['CRVAL2'] + x_shift * target_heads[0]['CD2_1'] * x_scale + y_shift * target_heads[0]['CD2_2'] * y_scale
+        #         # Save intermediate images
+        # except:
+        #     print("Fine alignment fails. Probably no sources found! Skipping for now")
+        #     continue
 
         for i in range(phot_imgs.shape[0]):
             driz = Drizzle(outwcs=WCS(target_heads[i]))
