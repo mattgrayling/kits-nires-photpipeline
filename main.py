@@ -20,11 +20,13 @@ from astropy.stats import sigma_clip
 from drizzle.drizzle import Drizzle
 import photutils
 from photutils.detection import DAOStarFinder, IRAFStarFinder
-from photutils.aperture import ApertureStats, CircularAperture, CircularAnnulus
+from photutils.aperture import aperture_photometry, ApertureStats, CircularAperture, CircularAnnulus
 import astroalign as aa
 from astropy.visualization import SqrtStretch
 from astropy.visualization.mpl_normalize import ImageNormalize
 from astroquery.vizier import Vizier
+from tqdm import tqdm
+from copy import deepcopy
 
 # We will divide by zero. Shoot me.
 np.seterr(divide='ignore')
@@ -112,7 +114,18 @@ def fix_NIRES_WCS(header):
     Input: original header
     Output: FITS header with the CD matrix fixed
     """
+
+    # if header['TARGNAME'] == '2023fyq':
+    #     header['ROTDEST'] = 58
+    #     header['PA'] = 58
+
     PA = header['ROTDEST']  # PA of vertical axis of the image
+
+    # Hack fix for 2023fyq
+    # if header['TARGNAME'] == '2023fyq':
+    #     PA = 58.0
+    #     header['PA'] = 58
+
     # load up the original CD
     original_CD = np.array([[header['CD1_1'], header['CD1_2']],
                             [header['CD2_1'], header['CD2_2']]])
@@ -178,7 +191,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
     all_flats = []
     all_heads = []
 
-    for i, file in enumerate(file_list):
+    # Reading in all files for  night
+    for i, file in tqdm(enumerate(file_list), total=len(file_list)):
         with fits.open(file) as hdu:
             head = hdu[0].header
             img = hdu[0].data
@@ -237,27 +251,46 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         print('The following targets are getting processed: ')
         print(targets_to_process)
 
+    # targets_to_process = ['2024gqd']
+
     for target in np.unique(all_targets):
-        # targets_to_process = ['2022crv']
-        # targets_to_process = ['2022jli_S1']
-        if target not in targets_to_process:
+        if target not in targets_to_process or '_S1' in target or '202' not in target:
             continue  # as in quit the loop and continue
-        # if target == '13232490+444059':
-        #     continue
         print("Processing ", target)
         target_inds = all_targets == target
-        # extra_target_inds = all_targets == f'{target}_S1'
-        # target_inds = target_inds + extra_target_inds
+        if f'{target}_S1' in np.unique(all_targets):
+            extra_target_inds = all_targets == f'{target}_S1'
+            target_inds = target_inds + extra_target_inds
         start, stop = np.where(target_inds)[0][0], np.where(target_inds)[0][-1]
+        # Just for fyq!!!---------------
+        if target == '2023fyq' and directory == '20230729':
+            start = start + 6
+            target_inds[:7] = False
         target_imgs = all_imgs[target_inds, ...]
+        # for i in range(target_imgs.shape[0]):
+        #     mean, med, std = sigma_clipped_stats(target_imgs[i])
+        #     plt.figure()
+        #     plt.imshow(target_imgs[i], vmin=mean - 3 * std, vmax=mean + 3 * std)
+        # plt.show()
+        # return
+        # target_imgs = target_imgs[2:, ...]
         target_heads = all_heads[start: stop + 1]
+        targets = all_targets[target_inds]
+        bad = input('Are there any bad images you want to drop?: ')
+        bad = np.array(bad.split()).astype(int)
+        if len(bad) > 0:
+            bad = np.sort(bad)[::-1]
+            target_imgs = np.delete(target_imgs, bad, axis=0)
+            targets = np.delete(targets, bad, axis=0)
+            for ind in bad:
+                del target_heads[ind]
+        S1_targets = np.array(['_S1' in targ for targ in targets])
         fns = file_list[target_inds]
         # If there's only one file, skip
         if target_imgs.shape[0] < 2:
             continue
         offsets = np.zeros(len(target_heads))
         # Figure out which images have the source outside the slit
-
         mask = np.ones((1024, 1024), dtype=np.uint8)
         mask[:50, :] = 0
         mask[-50:, :] = 0
@@ -266,58 +299,14 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         mask[900:, :120] = 0
         mask[940:, :175] = 0
 
-        slit_centroids = np.zeros((target_imgs.shape[0], 2))
-
+        slit_centroid = 121.5, 465.3
         for i, head in enumerate(target_heads):
             offsets[i] = head['XOFFSET'] + head['YOFFSET']
-            # if offsets[i] > 0:
-            test_image = target_imgs[i].copy()
-            test_image[test_image > np.median(test_image) - 3 * np.std(test_image)] = 0
-            test_image = test_image / test_image.max()
-            test_image = (test_image > 0.01).astype(np.uint8)
-            test_image_comp = cv2.bitwise_not(test_image)
-            # Remove single pixels
-            kernel1 = np.array([[0, 0, 0],
-                                [0, 1, 0],
-                                [0, 0, 0]], np.uint8)
-            kernel2 = np.array([[1, 1, 1],
-                                [1, 0, 1],
-                                [1, 1, 1]], np.uint8)
-            hitormiss1 = cv2.morphologyEx(test_image, cv2.MORPH_ERODE, kernel1)
-            hitormiss2 = cv2.morphologyEx(test_image_comp, cv2.MORPH_ERODE, kernel2)
-            hitormiss = cv2.bitwise_and(hitormiss1, hitormiss2)
-            test_image -= hitormiss
-            test_image *= mask
-            n, labels, stats, centroids = cv2.connectedComponentsWithStats(test_image)
-            slit_ind = np.argsort(stats[:, -1])[-2]
-            slit_centroid = (centroids[slit_ind, 0], centroids[slit_ind, 1])
-            slit_centroids[i, ...] = slit_centroid
 
-        slit_centroid = np.median(slit_centroids, axis=0)
+        targ_coord = SkyCoord(f'{target_heads[0]["TARGRA"]} {target_heads[0]["TARGDEC"]}', unit=(u.deg, u.deg))
 
-        targ_coord = SkyCoord(f'{head["TARGRA"]} {head["TARGDEC"]}', unit=(u.deg, u.deg))
-
-        seps, pas = [], []
-        # Correct for astrometry based on slit position
-        for i, head in enumerate(target_heads):
-            if offsets[i] != 0:
-                head = target_heads[i]
-                wcs = WCS(head)
-                slit_coord = wcs.pixel_to_world(*slit_centroid)
-                ref_coord = slit_coord.directional_offset_by(head['PA'], (offsets[i] / 3600) * u.deg)
-                sep, pa = ref_coord.separation(targ_coord).to(u.deg), ref_coord.position_angle(targ_coord).to(u.deg)
-                seps.append(sep.value)
-                pas.append(pa.value)
-        sep, pa, = np.median(seps), np.median(pas)
-
-        for i in range(len(target_heads)):
-            head = target_heads[i]
-            init_coord = SkyCoord(head['CRVAL1'], head['CRVAL2'], unit=(u.deg, u.deg))
-            updated_coord = init_coord.directional_offset_by(pa * u.deg, sep * u.deg)
-            target_heads[i]['CRVAL1'] = updated_coord.ra.value
-            target_heads[i]['CRVAL2'] = updated_coord.dec.value
-
-        phot_imgs = target_imgs[offsets == 0]  # Only use images where source is not on slit for photometry
+        phot_imgs = target_imgs[(offsets == 0) & ~S1_targets]  # Only use images where source is not on slit for photometry
+        # phot_imgs = target_imgs[:2, ...]
 
         # Measure median pixel value across image for background scale
         background_scales = []
@@ -358,11 +347,74 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 hdu.writeto(f'data/{directory}/redux/bkg_sub_{outname}', overwrite=True)
 
         # #############combine image###############
+
+        if S1_targets.sum() > 0:  # Need additional WCS care in this case
+            ref_image = target_imgs[0, ...]
+            slit_image = target_imgs[offsets != 0, ...][0, ...]
+            mean, med, std = sigma_clipped_stats(slit_image)
+            ref_image[ref_image < 0] = 0
+            slit_image[slit_image < 0] = 0
+            daofind = DAOStarFinder(fwhm=10, threshold=5 * std)
+            sources = daofind(ref_image, mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
+            # Ignore sources too close to edge
+            sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
+                              (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
+            sources = sources.reset_index(drop=True)
+            fig, ax = plt.subplots(1, 2)
+            ax[0].imshow(ref_image, vmin=mean - 3 * std, vmax=mean + 3 * std)
+            ax[1].imshow(slit_image, vmin=mean - 3 * std, vmax=mean + 3 * std)
+            for i, row in sources.head(20).iterrows():
+                source_aperture = CircularAperture((row.xcentroid, row.ycentroid), r=10)
+                source_aperture.plot(color='w', lw=4, ax=ax[0])
+                ax[0].annotate(i, (row.xcentroid, row.ycentroid))
+            plt.show()
+
+            ref_id = int(input('Reference source for correcting WCS offset: '))
+            ref_coords = input('Rough coordinates of reference source in second image: ')
+            ref_coords = np.array(ref_coords.split()).astype(int)
+            ref_x1, ref_y1 = int(sources.iloc[ref_id].xcentroid), int(sources.iloc[ref_id].ycentroid)
+            ref_x2, ref_y2 = ref_coords
+            corr_size = 50
+            xshift, yshift = image_registration.cross_correlation_shifts(
+                ref_image[ref_y1 - corr_size: ref_y1 + corr_size, ref_x1 - corr_size: ref_x1 + corr_size],
+                slit_image[ref_y2 - corr_size: ref_y2 + corr_size, ref_x2 - corr_size: ref_x2 + corr_size])
+            xshift, yshift = ref_x2 - ref_x1 + xshift, ref_y2 - ref_y1 + yshift
+            # plt.imshow(ref_image, vmin=mean + 2 * std, vmax=mean + 6 * std)
+            # plt.figure()
+            # plt.imshow(slit_image, vmin=mean + 2 * std, vmax=mean + 6 * std)
+            # plt.figure()
+            # plt.imshow(ref_image[ref_y1 - corr_size: ref_y1 + corr_size, ref_x1 - corr_size: ref_x1 + corr_size], vmin=0, vmax=100)
+            # plt.figure()
+            # plt.imshow(slit_image[ref_y2 - corr_size: ref_y2 + corr_size, ref_x2 - corr_size: ref_x2 + corr_size], vmin=0, vmax=100)
+            # plt.show()
+            x_scale, y_scale = 1, 1
+            cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
+            for i in range(target_imgs.shape[0]):
+                if S1_targets[i]:
+                    continue
+                # plt.imshow(target_imgs[i], vmin=mean - 3 * std, vmax=mean + 3 * std)
+                # wcs = WCS(target_heads[i])
+                # target_pix = wcs.world_to_pixel(targ_coord)
+                # target_aperture = CircularAperture(target_pix, r=10)
+                # target_aperture.plot(lw=4, color='b')
+                target_heads[i]['CRVAL1'] = target_heads[i]['CRVAL1'] + (
+                        xshift * target_heads[i]['CD1_1'] * x_scale + yshift * target_heads[i][
+                    'CD1_2'] * y_scale) / cosdec
+                target_heads[i]['CRVAL2'] = target_heads[i]['CRVAL2'] + xshift * target_heads[i][
+                    'CD2_1'] * x_scale + yshift * target_heads[0]['CD2_2'] * y_scale
+                # wcs = WCS(target_heads[i])
+                # target_pix = wcs.world_to_pixel(targ_coord)
+                # target_aperture = CircularAperture(target_pix, r=10)
+                # target_aperture.plot(lw=4, color='r')
+                # plt.show()
+
         # Use the CORRECTED WCS to align. This should be good enough for now.
         for i in range(target_imgs.shape[0]):  # range(phot_imgs.shape[0]):
             driz = Drizzle(outwcs=WCS(target_heads[0]))
             driz.add_image(target_imgs[i], WCS(target_heads[i]))
             target_imgs[i] = driz.outsci
+
+        orig_target_heads = deepcopy(target_heads)
 
         # ##########FINE ALIGNMENT FROM OLD SCRIPT###################
 
@@ -378,12 +430,31 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
             # Ignore sources too close to edge
             sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
                               (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
-            ref_x, ref_y = int(sources.iloc[0].xcentroid), int(sources.iloc[0].ycentroid)
-
-            for i in range(phot_imgs.shape[0]):
+            sources = sources.reset_index(drop=True)
+            plt.imshow(align_images[0], vmin=mean - 3 * std, vmax=mean + 3 * std)
+            for i, row in sources.head(20).iterrows():
+                source_aperture = CircularAperture((row.xcentroid, row.ycentroid), r=10)
+                source_aperture.plot(color='w', lw=4)
+                plt.annotate(i, (row.xcentroid, row.ycentroid))
+            plt.show()
+            ref_id = int(input('Reference source for image alignment: '))
+            ref_x, ref_y = int(sources.iloc[ref_id].xcentroid), int(sources.iloc[ref_id].ycentroid)
+            # ref_x, ref_y = int(sources.iloc[1].xcentroid), int(sources.iloc[1].ycentroid)
+            corr_size = 100
+            for i in range(target_imgs.shape[0]):
                 xshift, yshift = image_registration.cross_correlation_shifts(
-                    align_images[0][ref_y - 50: ref_y + 50, ref_x - 50: ref_x + 50],
-                    align_images[i][ref_y - 50: ref_y + 50, ref_x - 50: ref_x + 50])
+                    align_images[0][ref_y - corr_size: ref_y + corr_size, ref_x - corr_size: ref_x + corr_size],
+                    align_images[i][ref_y - corr_size: ref_y + corr_size, ref_x - corr_size: ref_x + corr_size])
+                # print(xshift, yshift)
+                # plt.imshow(align_images[0], vmin=mean + 2 * std, vmax=mean + 6 * std)
+                # plt.figure()
+                # plt.imshow(align_images[i], vmin=mean + 2 * std, vmax=mean + 6 * std)
+                # plt.figure()
+                # plt.imshow(align_images[0][ref_y - corr_size: ref_y + corr_size, ref_x - corr_size: ref_x + corr_size], vmin=0, vmax=100)
+                # plt.figure()
+                # plt.imshow(align_images[i][ref_y - corr_size: ref_y + corr_size, ref_x - corr_size: ref_x + corr_size], vmin=0, vmax=100)
+                # plt.show()
+                print(i, xshift, yshift)
                 x_scale, y_scale = -1, -1
                 cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
                 target_heads[i]['CRVAL1'] = target_heads[0]['CRVAL1'] + (
@@ -391,12 +462,17 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                     'CD1_2'] * y_scale) / cosdec
                 target_heads[i]['CRVAL2'] = target_heads[0]['CRVAL2'] + xshift * target_heads[0][
                     'CD2_1'] * x_scale + yshift * target_heads[0]['CD2_2'] * y_scale
+                orig_target_heads[i]['CRVAL1'] = orig_target_heads[i]['CRVAL1'] + (
+                        xshift * orig_target_heads[i]['CD1_1'] * x_scale + yshift * orig_target_heads[i][
+                    'CD1_2'] * y_scale) / cosdec
+                orig_target_heads[i]['CRVAL2'] = orig_target_heads[i]['CRVAL2'] + xshift * orig_target_heads[i][
+                    'CD2_1'] * x_scale + yshift * orig_target_heads[i]['CD2_2'] * y_scale
 
-            #     print(xshift, yshift)
-            #     plt.figure()
-            #     plt.imshow(align_images[0], vmin=0, vmax=200)
-            #     plt.figure()
-            #     plt.imshow(align_images[i], vmin=0, vmax=200)
+                # print(xshift, yshift)
+                # plt.figure()
+                # plt.imshow(align_images[0], vmin=0, vmax=200)
+                # plt.figure()
+                # plt.imshow(align_images[i], vmin=0, vmax=200)
             # plt.show()
         elif alignment_method == 'cross_correlation':
             # Image shift using cross-correlations-------------------------------
@@ -430,7 +506,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 # use bpm here
                 daofind = DAOStarFinder(fwhm=10, threshold=5 * std)
                 sources = daofind(target_imgs[0], mask=bpm).to_pandas().sort_values(by='flux', ascending=False)
-                print(sources.shape)
                 # Ignore sources too close to edge
                 sources = sources[(sources['xcentroid'] > 50) & (sources['xcentroid'] < 974) &
                                   (sources['ycentroid'] > 50) & (sources['ycentroid'] < 974)]
@@ -496,6 +571,93 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 print("Fine alignment fails. Probably no sources found! Skipping for now")
                 continue
 
+        seps, pas = [], []
+        # Correct for astrometry based on slit position
+        for i, head in enumerate(target_heads):
+            if offsets[i] != 0:
+                wcs = WCS(orig_target_heads[i])
+                slit_coord = wcs.pixel_to_world(*slit_centroid)
+                ref_coord = slit_coord.directional_offset_by(head['ROTDEST'] * u.deg, (offsets[i] / 3600) * u.deg)
+                sep, pa = ref_coord.separation(targ_coord).to(u.deg), ref_coord.position_angle(targ_coord).to(u.deg)
+                seps.append(sep.value)
+                pas.append(pa.value)
+                # mean, med, std = sigma_clipped_stats(target_imgs[i])
+                # wcs = WCS(target_heads[0])
+                # plt.figure()
+                # plt.imshow(target_imgs[0], vmin=mean + 3 * std, vmax=mean + 6 * std)
+                # ref_pix = wcs.world_to_pixel(ref_coord)
+                # for plot_sep in np.linspace(0, sep, 10):
+                #     plot_coord = targ_coord.directional_offset_by(pa, -plot_sep)
+                #     plot_pix = wcs.world_to_pixel(plot_coord)
+                #     plot_aperture = CircularAperture(plot_pix, r=4)
+                #     plot_aperture.plot(color='green', lw=2)
+                # target_aperture = CircularAperture(wcs.world_to_pixel(slit_coord), r=10)
+                # target_aperture.plot(color='blue', lw=4)
+                # target_aperture = CircularAperture(wcs.world_to_pixel(targ_coord), r=10)
+                # target_aperture.plot(color='k', lw=4)
+                # target_aperture = CircularAperture(ref_pix, r=10)
+                # target_aperture.plot(color='red', lw=4)
+                # plt.show()
+
+                # plt.figure()
+                # ax = plt.subplot(projection=wcs)
+                # mean, med, std = sigma_clipped_stats(target_imgs[i])
+                # ax.imshow(target_imgs[i], vmin=mean - 3 * std, vmax=mean + 3 * std)
+                # ref_pix = wcs.world_to_pixel(ref_coord)
+                # ref_aperture = CircularAperture(ref_pix, r=10)
+                # target_pix = wcs.world_to_pixel(targ_coord)
+                # target_aperture = CircularAperture(target_pix, r=10)
+                # ref_aperture.plot(color='red', lw=4)
+                # target_aperture.plot(color='blue', lw=4)
+                # for plot_sep in np.linspace(0, sep, 10):
+                #     print(plot_sep, sep)
+                #     plot_coord = targ_coord.directional_offset_by(pa, -plot_sep)
+                #     plot_pix = wcs.world_to_pixel(plot_coord)
+                #     plot_aperture = CircularAperture(plot_pix, r=4)
+                #     plot_aperture.plot(color='green', lw=2)
+                #     print(plot_pix)
+                # plt.show()
+
+        # print(seps)
+        # print(pas)
+        sep, pa = np.median(seps), np.median(pas)
+        # sep = sep * 0.86
+        # pa = pa - 23.5  # 4.3
+
+        for i in range(len(target_heads)):
+            head = target_heads[i]
+            init_coord = SkyCoord(head['CRVAL1'], head['CRVAL2'], unit=(u.deg, u.deg))
+            updated_coord = init_coord.directional_offset_by(pa * u.deg, sep * u.deg)
+            target_heads[i]['CRVAL1'] = updated_coord.ra.value
+            target_heads[i]['CRVAL2'] = updated_coord.dec.value
+
+            # wcs = WCS(target_heads[i])
+            # plt.figure()
+            # ax = plt.subplot(projection=wcs)
+            # mean, med, std = sigma_clipped_stats(target_imgs[i])
+            # ax.imshow(target_imgs[i], vmin=mean + 2 * std, vmax=mean + 8 * std)
+            # target_pix = wcs.world_to_pixel(targ_coord)
+            # target_aperture = CircularAperture(target_pix, r=10)
+            # target_aperture.plot(color='blue', lw=4)
+            # print(target_pix)
+            # for plot_sep in np.linspace(0, sep, 10):
+            #     plot_coord = targ_coord.directional_offset_by(pa * u.deg, -plot_sep * u.deg)
+            #     plot_pix = wcs.world_to_pixel(plot_coord)
+            #     plot_aperture = CircularAperture(plot_pix, r=4)
+            #     plot_aperture.plot(color='green', lw=2)
+            #     print(plot_pix)
+            # plt.show()
+            # continue
+            #
+            # mean, med, std = sigma_clipped_stats(target_imgs[i])
+            # plt.figure()
+            # ax = plt.subplot(projection=wcs)
+            # ax.imshow(target_imgs[i], vmin=mean + 4 * std, vmax=mean + 10 * std)
+            # target_pix = wcs.world_to_pixel(targ_coord)
+            # target_aperture = CircularAperture(target_pix, r=10)
+            # target_aperture.plot(color='red', lw=4)
+            # # plt.show()
+
         for i in range(phot_imgs.shape[0]):
             driz = Drizzle(outwcs=WCS(target_heads[i]))
             driz.add_image(target_imgs[i], WCS(target_heads[i]))
@@ -506,102 +668,203 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         for i in range(phot_imgs.shape[0]):
             driz.add_image(target_imgs[i], WCS(target_heads[i]))
 
-        driz.write(f'data/{directory}/redux/combined/{target}_{i}.fits.gz')
+        # Alignment to ensure that target RA/Dec lie exactly on source position
+        mean, med, std = sigma_clipped_stats(driz.outsci)
+        daofind = DAOStarFinder(fwhm=5, threshold=5 * std)
+        sources = daofind(driz.outsci - med).to_pandas()
+        target_pix = wcs.world_to_pixel(targ_coord)
 
         # Fine adjustment of WCS
-        try:
-            stack = fits.open(f'data/{directory}/redux/combined/{target}_{i}.fits.gz')
-            stacked_img = stack[1].data
-            # Fine adjustment of WCS
-            Vizier.ROW_LIMIT = -1
-            result = Vizier.query_region(targ_coord, width="6m", catalog=["II/246/out", "II/319/las9"])
-            good_tables = []
-            for i, table in enumerate(result):
-                if table.meta['ID'] == 'II_246_out':
-                    table = table#[(table['Qflg'] == 'AAA') & (table[0]['Bflg'] == '111')]
-                elif table.meta['ID'] == 'II_319_las9':
-                    table = table[table['Jmag1'] < 19]
-                table = table['RAJ2000', 'DEJ2000']
-                good_tables.append(table)
-            good_sources = vstack([*good_tables])
-            # good2M = result[0][(result[0]['Qflg'] == 'AAA') & (result[0]['Bflg'] == '111')]
-            # good_UKIDSS = result[1][result[1]['Jmag1'] < 19]
-            mean, med, std = sigma_clipped_stats(stacked_img)
+        sources['sep'] = np.sqrt(
+            (target_pix[0] - sources['xcentroid']) ** 2 + (target_pix[1] - sources['ycentroid']) ** 2)
+        max_source = sources[sources.sep == sources.sep.min()]
 
-            sources = daofind(stacked_img - med)
-            ref_coord = SkyCoord(ra=good_sources['RAJ2000'], dec=good_sources['DEJ2000'], unit=(u.deg, u.deg))
-            ref_pix = wcs.world_to_pixel(ref_coord)
+        xshift, yshift = target_pix[0] - max_source.xcentroid.values[0], target_pix[1] - max_source.ycentroid.values[0]
+        x_scale, y_scale = 1, 1
+        cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
+        for i in range(phot_imgs.shape[0]):
+            target_heads[i]['CRVAL1'] = target_heads[i]['CRVAL1'] + (
+                    xshift * target_heads[i]['CD1_1'] * x_scale + yshift * target_heads[i][
+                'CD1_2'] * y_scale) / cosdec
+            target_heads[i]['CRVAL2'] = target_heads[i]['CRVAL2'] + xshift * target_heads[i][
+                'CD2_1'] * x_scale + yshift * target_heads[0]['CD2_2'] * y_scale
+        wcs = WCS(target_heads[0])
 
-            target_pix = wcs.world_to_pixel(targ_coord)
-            aperture_ann = CircularAperture(target_pix, r=5)
+        driz = Drizzle(outwcs=wcs)
+        for i in range(phot_imgs.shape[0]):
+            driz.add_image(target_imgs[i], WCS(target_heads[i]))
 
-            fig = plt.figure(figsize=(10, 10))
-            ax = plt.subplot(projection=wcs)
-            ax.imshow(stacked_img, origin='lower', vmin=mean - 3 * std, vmax=mean + 5 * std)
-            ap_patches = aperture_ann.plot(color='blue', lw=2)
+        driz.write(f'data/{directory}/redux/combined/{target}.fits.gz')
 
-            matches_px = []
-            for ind, i in enumerate(ref_pix[0]):
-                x, y = (ref_pix[0][ind], ref_pix[1][ind])
-                matches_px += [[x, y]]
+        # fig = plt.figure(figsize=(10, 10))
+        # plt.imshow(driz.outsci, origin='lower', vmin=mean-8*std, vmax=mean+90*std)
+        # plt.xlim(target_pix[0] - 100, target_pix[0] + 100)
+        # plt.ylim(target_pix[1] - 100, target_pix[1] + 100)
+        # target_pix = wcs.world_to_pixel(targ_coord)
+        # target_aperture = CircularAperture(target_pix, r=10)
+        # ap_patches = target_aperture.plot(color='blue', lw=2)
+        #
+        # plt.show()
 
-            ap_matches = CircularAperture(matches_px, r=10)
-            foo = ap_matches.plot(color='white', lw=1)
+        # offset = input('At this point, the aperture should lie right on the target. Do you want to apply a pixel offset?: ')
+        # if offset.lower() in ['y', 'yes']:
+        #     pix_offset = input('What pixel offset would you like to apply?')
+        #     pix_offset = np.array(pix_offset.split(' '))
+        #     print(pix_offset)
 
-            # Match sources found to UKIDSS
-            matches = []
-            for ind, i in enumerate(ref_pix[0]):
-                dist = np.sqrt((np.array(sources['xcentroid']) - ref_pix[0][ind]) ** 2 +
-                               (np.array(sources['ycentroid']) - ref_pix[1][ind]) ** 2)
-                idx = np.argmin(dist)
-                if np.min(dist) < 50:
-                    matches += [[idx, ind, np.min(dist)]]
-            matches = np.array(matches)
+        # Fine adjustment of WCS
+        #try:
+        stack = fits.open(f'data/{directory}/redux/combined/{target}.fits.gz')
+        stacked_img = stack[1].data
 
-            fig = plt.figure(figsize=(10, 10))
-            ax = plt.subplot(projection=wcs)
+        Vizier.ROW_LIMIT = -1
+        result = Vizier.query_region(targ_coord, radius=0.05 * u.deg, catalog=["II/246/out", "II/319/las9"])
+        good_tables = []
+        for i, table in enumerate(result):
+            if table.meta['ID'] == 'II_246_out':
+                table = table[(table['Qflg'] == 'AAA') & (table[0]['Bflg'] == '111')]
+            elif table.meta['ID'] == 'II_319_las9':
+                table = table[table['Kmag'] < 20]
+            table = table['RAJ2000', 'DEJ2000']
+            good_tables.append(table)
+        good_sources = vstack([*good_tables])
 
-            ax.imshow(stacked_img, origin='lower', vmin=mean - 3 * std, vmax=mean + 5 * std)
+        # good2M = result[0][(result[0]['Qflg'] == 'AAA') & (result[0]['Bflg'] == '111')]
+        # good_UKIDSS = result[1][result[1]['Jmag1'] < 19]
+        mean, med, std = sigma_clipped_stats(stacked_img)
 
-            target_pix = wcs.world_to_pixel(targ_coord)
-            aperture_ann = CircularAperture(target_pix, r=5)
+        daofind = DAOStarFinder(fwhm=5, threshold=5 * std, sharphi=0.55)
+        sources = daofind(stacked_img - med)
+        sources = sources[sources['flux'] > 1.5]
+        ref_coord = SkyCoord(ra=good_sources['RAJ2000'], dec=good_sources['DEJ2000'], unit=(u.deg, u.deg))
+        ref_pix = wcs.world_to_pixel(ref_coord)
 
-            ap_patches = aperture_ann.plot(color='blue', lw=2)
+        target_pix = wcs.world_to_pixel(targ_coord)
+        target_aperture = CircularAperture(target_pix, r=10)
 
-            matches_px = []
-            for ind, i in enumerate(matches):
-                x, y = sources[int(i[0])]['xcentroid'], sources[int(i[0])]['ycentroid']
-                matches_px += [[x, y]]
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot()  # projection=wcs
+        ax.imshow(stacked_img, origin='lower', vmin=median - 3 * std, vmax=median + 3 * std)
+        ap_patches = target_aperture.plot(color='blue', lw=4)
 
-            ap_matches = CircularAperture(matches_px, r=10)
-            foo = ap_matches.plot(color='white', lw=1)
+        for i, row in sources.to_pandas().iterrows():
+            source_aperture = CircularAperture((row.xcentroid, row.ycentroid), r=10)
+            source_aperture.plot(color='w', lw=4)
 
-            ###########FIT FOR A NEW WCS
-            new_wcs = fit_wcs_from_points((sources[matches[:, 0].astype('int')]['xcentroid'],
-                                           sources[matches[:, 0].astype('int')]['ycentroid']),
-                                          ref_coord[matches[:, 1].astype('int')], proj_point='center', projection='TAN',
-                                          sip_degree=1)
-            new_header = new_wcs.to_header(relax=True)
-            wcs = new_wcs
-
-            for ext in stack:
-                for j in new_header:
-                    ext.header[j] = new_header[j]
-
-            stack.writeto(f'data/{directory}/redux/fixed_astrometry/{target}.fits.gz', overwrite=True)
-        except:
-            print('Error doing astrometry, continuing to next source')
-            plt.close('all')
+        matches_px = []
+        for ind, i in enumerate(ref_pix[0]):
+            x, y = (ref_pix[0][ind], ref_pix[1][ind])
+            matches_px += [[x, y]]
+        if len(matches_px) == 0:
+            print(f'Skipping {target}, no reference sources found in catalogue to build WCS')
             continue
 
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot()  # projection=wcs
+        ax.imshow(stacked_img, origin='lower', vmin=median - 3 * std, vmax=median + 3 * std)
+
+        ap_matches = CircularAperture(matches_px, r=10)
+        foo = ap_matches.plot(color='r', lw=1)
+
+        plt.show()
+
+        # Match sources found to UKIDSS
+        matches = []
+        for ind, i in enumerate(ref_pix[0]):
+            if ref_pix[0][ind] < 0 or ref_pix[0][ind] > 1024 or ref_pix[1][ind] < 0 or ref_pix[1][ind] > 1024:
+                continue
+            dist = np.sqrt((np.array(sources['xcentroid']) - ref_pix[0][ind]) ** 2 +
+                           (np.array(sources['ycentroid']) - ref_pix[1][ind]) ** 2)
+            idx = np.argmin(dist)
+            if np.min(dist) < 50:
+                matches += [[idx, ind, np.min(dist)]]
+        if len(matches) == 0:
+            print(f'Skipping {target}, no reference sources found in catalogue to build WCS')
+            continue
+
+        matches = np.array(matches)
+
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot()  # projection=wcs
+
+        ax.imshow(stacked_img, origin='lower', vmin=mean - 3 * std, vmax=mean + 3 * std)
+
+        target_pix = wcs.world_to_pixel(targ_coord)
+        target_aperture = CircularAperture(target_pix, r=10)
+
+        ap_patches = target_aperture.plot(color='blue', lw=2)
+
+        matches_px = []
+        for ind, i in enumerate(matches):
+            x, y = sources[int(i[0])]['xcentroid'], sources[int(i[0])]['ycentroid']
+            matches_px += [[x, y]]
+
+        ap_matches = CircularAperture(matches_px, r=10)
+        foo = ap_matches.plot(color='white', lw=1)
+
+        ###########FIT FOR A NEW WCS
+        new_wcs = fit_wcs_from_points((sources[matches[:, 0].astype('int')]['xcentroid'],
+                                       sources[matches[:, 0].astype('int')]['ycentroid']),
+                                      ref_coord[matches[:, 1].astype('int')], proj_point='center', projection='TAN',
+                                      sip_degree=1)
+        new_header = new_wcs.to_header(relax=True)
+        wcs = new_wcs
+
+        for ext in stack:
+            for j in new_header:
+                ext.header[j] = new_header[j]
+
+        stack.writeto(f'data/{directory}/redux/fixed_astrometry/{target}.fits.gz', overwrite=True)
+        # except:
+        #     print('Error doing astrometry, continuing to next source')
+        #     plt.close('all')
+        #     continue
+
         final_im = fits.open(f'data/{directory}/redux/fixed_astrometry/{target}.fits.gz')
+
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot(projection=new_wcs)
+
+        ax.imshow(final_im[1].data, origin='lower', vmin=mean - 3 * std, vmax=mean + 8 * std)
+
+        # positions = SkyCoord(catalog['l'], catalog['b'], frame='galactic')
+        SN_pix = new_wcs.world_to_pixel(targ_coord)
+        aperture = CircularAperture(SN_pix, r=10)
+
+        size = 500
+        ax.set_xlim([SN_pix[0] - size, SN_pix[0] + size])
+        ax.set_ylim([SN_pix[1] - size, SN_pix[1] + size])
+
+        ap_patches = aperture.plot(color='blue', lw=2)
+
+        #########PLOT UKIDSS to check
+        ap_UKIDSS = []
+        for i in good_sources:
+            coord = SkyCoord(ra=i['RAJ2000'] * u.deg, dec=i['DEJ2000'] * u.deg)
+            pix = new_wcs.world_to_pixel(coord)
+            fake_ap = CircularAperture(pix, r=10)
+            ap_stats = ApertureStats(final_im[1].data, fake_ap)
+            #     print(pix, ap_stats.centroid)
+            #     print(ap_stats.centroid[0])
+            if ~np.isnan(ap_stats.centroid[0]):
+                ap_UKIDSS += [ap_stats.centroid]
+        #     bad_UKIDSS += [pix]
+        #     ap_UKIDSS += [pix]
+
+        aperture_UKIDSS = CircularAperture(ap_UKIDSS, r=10)
+        # foo = photutils.CircularAperture(bad_UKIDSS, r=10)
+        # annulus_UKIDSS = CircularAnnulus(ap_UKIDSS, r_in=15, r_out = 20)
+
+        foo = aperture_UKIDSS.plot(color='red', lw=1)
+        # foo2 = annulus_UKIDSS.plot(color = 'red', lw = 1)
 
         # Do photometry-------------------------------
         result = Vizier.query_region(targ_coord, width="3m", catalog=["II/246/out", "II/319/las9"])
         good_tables = []
         for i, table in enumerate(result):
             if table.meta['ID'] == 'II_246_out':
-                table = table#[(table['Qflg'] == 'AAA') & (table[0]['Bflg'] == '111')]
+                continue
+                table = table[(table['Qflg'] == 'AAA') & (table[0]['Bflg'] == '111')]
             elif table.meta['ID'] == 'II_319_las9':
                 table = table[table['Kmag'] < 18]
             table = table['RAJ2000', 'DEJ2000', 'Kmag', 'e_Kmag']
@@ -612,6 +875,7 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
 
         # positions = SkyCoord(catalog['l'], catalog['b'], frame='galactic')
         target_pix = wcs.world_to_pixel(targ_coord)
+
         aperture_target = CircularAperture(target_pix, r=10)
         ap_stats = ApertureStats(final_im[1].data, aperture_target)
         aperture_target = CircularAperture(ap_stats.centroid, r=10)
@@ -633,12 +897,12 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 ap_ref += [pix]
         ref_good = np.array(ref_good)
 
-        aperture_ref = CircularAperture(ap_ref, r=15)
-        annulus_ref = CircularAnnulus(ap_ref, r_in=20, r_out=30)
+        aperture_ref = CircularAperture(ap_ref, r=5)
+        annulus_ref = CircularAnnulus(ap_ref, r_in=10, r_out=15)
 
         fig = plt.figure(figsize=(10, 10))
         ax = plt.subplot(projection=wcs)
-        ax.imshow(stacked_img, origin='lower', vmin=0, vmax=100)
+        ax.imshow(stacked_img, origin='lower', vmin=mean - 3 * std, vmax=mean + 8 * std)
         ap_patches = aperture_target.plot(color='blue', lw=2)
         ap_patches = annulus_target.plot(color='red', lw=2)
 
@@ -647,9 +911,25 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         for i in range(len(aperture_ref)):
             ax.text(aperture_ref.positions[i][0], aperture_ref.positions[i][1], i, fontsize=18)
 
-        phot_table_target = photutils.aperture_photometry(final_im[1].data, aperture_target,
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot(projection=wcs)
+        ax.imshow(stacked_img, origin='lower', vmin=mean-8*std, vmax=mean+90*std)
+        ap_patches = aperture_target.plot(color='blue', lw=2)
+        ap_patches = annulus_target.plot(color='red', lw=2)
+
+        aperture_ref.plot(color='white', lw=1)
+        annulus_ref.plot(color='red', lw=1)
+        for i in range(len(aperture_ref)):
+            ax.text(aperture_ref.positions[i][0], aperture_ref.positions[i][1], i, fontsize=18)
+
+        plt.show()
+
+        good_ids = input('Which ref sources are good and should be used?: ')
+        good_ids = np.array(good_ids.split()).astype(int)
+
+        phot_table_target = aperture_photometry(final_im[1].data, aperture_target,
                                                           error=np.sqrt(final_im[2].data))
-        phot_bkg_target = photutils.aperture_photometry(final_im[1].data, annulus_target,
+        phot_bkg_target = aperture_photometry(final_im[1].data, annulus_target,
                                                         error=np.sqrt(final_im[2].data))
 
         target_bkg_sub = phot_table_target[0]['aperture_sum'] - phot_bkg_target[0]['aperture_sum'] \
@@ -658,8 +938,11 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                                      (phot_bkg_target[0]['aperture_sum_err'] /
                                       annulus_target.area * aperture_target.area) ** 2)
 
-        phot_table_UKIDSS = photutils.aperture_photometry(final_im[1].data, aperture_ref, error=final_im[2].data)
-        phot_bkg_UKIDSS = photutils.aperture_photometry(final_im[1].data, annulus_ref, error=final_im[2].data)
+        phot_table_UKIDSS = aperture_photometry(final_im[1].data, aperture_ref, error=final_im[2].data)
+        phot_bkg_UKIDSS = aperture_photometry(final_im[1].data, annulus_ref, error=final_im[2].data)
+
+        phot_table_UKIDSS = phot_table_UKIDSS[good_ids]
+        phot_bkg_UKIDSS = phot_bkg_UKIDSS[good_ids]
 
         UKIDSS_bkg_sub = phot_table_UKIDSS['aperture_sum'] - phot_bkg_UKIDSS['aperture_sum'] / \
                          annulus_ref.area * aperture_ref.area
@@ -668,8 +951,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                                      (phot_bkg_UKIDSS[
                                           'aperture_sum_err'] / annulus_ref.area * aperture_ref.area) ** 2)
 
-        mags = good_sources[ref_good]['Kmag']
-        mag_err = good_sources[ref_good]['e_Kmag']
+        mags = good_sources[good_ids]['Kmag']
+        mag_err = good_sources[good_ids]['e_Kmag']
 
         ZP = mags + 2.5 * np.log10(UKIDSS_bkg_sub)
         ZP_err = np.sqrt(mag_err ** 2 + (2.5 / UKIDSS_bkg_sub / np.log(10) * UKIDSS_bkg_sub_err) ** 2)
@@ -677,13 +960,12 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         target_mag = -2.5 * np.log10(target_bkg_sub) + ZP
         target_emag = np.sqrt(ZP_err ** 2 + (2.5 / target_bkg_sub / np.log(10) * target_bkg_sub_err) ** 2)
 
-        print(target_mag, target_emag)
+        target_mag, target_emag = target_mag[~np.isnan(target_mag)], target_emag[~np.isnan(target_mag)]
 
         av_target_mag = np.average(target_mag, weights=1 / target_emag)
         av_target_mag_err = np.sqrt(np.cov(target_mag, aweights=1 / target_emag))
 
         print("K = %f +- %f mag" % (av_target_mag, av_target_mag_err))
-        plt.show()
 
         # driz.write(f'data/{directory}/redux/combined/{target}.fits.gz')
         # fig = plt.figure()
@@ -694,4 +976,4 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         # plt.show()
 
 
-reduceNight('20220222', write_flat=False, write_flatten=False, write_bkg=False, write_bkg_sub=False)
+reduceNight('20240426', write_flat=False, write_flatten=False, write_bkg=False, write_bkg_sub=False)
