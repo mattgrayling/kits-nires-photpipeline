@@ -20,7 +20,7 @@ from astropy.stats import sigma_clip
 from drizzle.drizzle import Drizzle
 import photutils
 from photutils.detection import DAOStarFinder, IRAFStarFinder
-from photutils.aperture import ApertureStats, CircularAperture, CircularAnnulus
+from photutils.aperture import aperture_photometry, ApertureStats, CircularAperture, CircularAnnulus
 import astroalign as aa
 from astropy.visualization import SqrtStretch
 from astropy.visualization.mpl_normalize import ImageNormalize
@@ -244,8 +244,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
     targets_to_process = [x for x in np.unique(all_targets) if
                           not x.startswith('HIP')]  # Can change this to only process some targets
 
-    targets_to_process = ['2024ahv']
-
     if verbose:
         print('The following targets are found in the headers: ')
         print(np.unique(all_targets))
@@ -305,39 +303,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         for i, head in enumerate(target_heads):
             offsets[i] = head['XOFFSET'] + head['YOFFSET']
 
-        # slit_centroids = np.zeros((target_imgs.shape[0], 2))
-        #
-        # for i, head in enumerate(target_heads):
-        #     offsets[i] = head['XOFFSET'] + head['YOFFSET']
-        #     # if offsets[i] > 0:
-        #     test_image = target_imgs[i].copy()
-        #     test_image[test_image > np.median(test_image) - 3 * np.std(test_image)] = 0
-        #     test_image = test_image / test_image.max()
-        #     test_image = (test_image > 0.01).astype(np.uint8)
-        #     test_image_comp = cv2.bitwise_not(test_image)
-        #     # Remove single pixels
-        #     kernel1 = np.array([[0, 0, 0],
-        #                         [0, 1, 0],
-        #                         [0, 0, 0]], np.uint8)
-        #     kernel2 = np.array([[1, 1, 1],
-        #                         [1, 0, 1],
-        #                         [1, 1, 1]], np.uint8)
-        #     hitormiss1 = cv2.morphologyEx(test_image, cv2.MORPH_ERODE, kernel1)
-        #     hitormiss2 = cv2.morphologyEx(test_image_comp, cv2.MORPH_ERODE, kernel2)
-        #     hitormiss = cv2.bitwise_and(hitormiss1, hitormiss2)
-        #     test_image -= hitormiss
-        #     test_image *= mask
-        #     n, labels, stats, centroids = cv2.connectedComponentsWithStats(test_image)
-        #     slit_ind = np.argsort(stats[:, -1])[-2]
-        #     slit_centroid = (centroids[slit_ind, 0], centroids[slit_ind, 1])
-        #     slit_centroids[i, ...] = slit_centroid
-        #
-        # slit_centroid = np.median(slit_centroids, axis=0)
-
         targ_coord = SkyCoord(f'{target_heads[0]["TARGRA"]} {target_heads[0]["TARGDEC"]}', unit=(u.deg, u.deg))
 
-        if target == '2022xlp':
-            offsets[2:4] = -99
         phot_imgs = target_imgs[(offsets == 0) & ~S1_targets]  # Only use images where source is not on slit for photometry
         # phot_imgs = target_imgs[:2, ...]
 
@@ -380,11 +347,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 hdu.writeto(f'data/{directory}/redux/bkg_sub_{outname}', overwrite=True)
 
         # #############combine image###############
-        # Use the CORRECTED WCS to align. This should be good enough for now.
-        for i in range(target_imgs.shape[0]):  # range(phot_imgs.shape[0]):
-            driz = Drizzle(outwcs=WCS(target_heads[0]))
-            driz.add_image(target_imgs[i], WCS(target_heads[i]))
-            target_imgs[i] = driz.outsci
 
         if S1_targets.sum() > 0:  # Need additional WCS care in this case
             ref_image = target_imgs[0, ...]
@@ -428,6 +390,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
             x_scale, y_scale = 1, 1
             cosdec = np.cos(np.deg2rad(target_heads[0]['CRVAL2']))
             for i in range(target_imgs.shape[0]):
+                if S1_targets[i]:
+                    continue
                 # plt.imshow(target_imgs[i], vmin=mean - 3 * std, vmax=mean + 3 * std)
                 # wcs = WCS(target_heads[i])
                 # target_pix = wcs.world_to_pixel(targ_coord)
@@ -438,11 +402,17 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                     'CD1_2'] * y_scale) / cosdec
                 target_heads[i]['CRVAL2'] = target_heads[i]['CRVAL2'] + xshift * target_heads[i][
                     'CD2_1'] * x_scale + yshift * target_heads[0]['CD2_2'] * y_scale
-                wcs = WCS(target_heads[i])
+                # wcs = WCS(target_heads[i])
                 # target_pix = wcs.world_to_pixel(targ_coord)
                 # target_aperture = CircularAperture(target_pix, r=10)
                 # target_aperture.plot(lw=4, color='r')
                 # plt.show()
+
+        # Use the CORRECTED WCS to align. This should be good enough for now.
+        for i in range(target_imgs.shape[0]):  # range(phot_imgs.shape[0]):
+            driz = Drizzle(outwcs=WCS(target_heads[0]))
+            driz.add_image(target_imgs[i], WCS(target_heads[i]))
+            target_imgs[i] = driz.outsci
 
         orig_target_heads = deepcopy(target_heads)
 
@@ -607,28 +577,27 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
             if offsets[i] != 0:
                 wcs = WCS(orig_target_heads[i])
                 slit_coord = wcs.pixel_to_world(*slit_centroid)
-                print(i, offsets[i], head['ROTDEST'])
                 ref_coord = slit_coord.directional_offset_by(head['ROTDEST'] * u.deg, (offsets[i] / 3600) * u.deg)
                 sep, pa = ref_coord.separation(targ_coord).to(u.deg), ref_coord.position_angle(targ_coord).to(u.deg)
                 seps.append(sep.value)
                 pas.append(pa.value)
-                mean, med, std = sigma_clipped_stats(target_imgs[i])
-                wcs = WCS(target_heads[0])
-                plt.figure()
-                plt.imshow(target_imgs[0], vmin=mean - 3 * std, vmax=mean + 3 * std)
-                ref_pix = wcs.world_to_pixel(ref_coord)
-                for plot_sep in np.linspace(0, sep, 10):
-                    plot_coord = targ_coord.directional_offset_by(pa, -plot_sep)
-                    plot_pix = wcs.world_to_pixel(plot_coord)
-                    plot_aperture = CircularAperture(plot_pix, r=4)
-                    plot_aperture.plot(color='green', lw=2)
-                target_aperture = CircularAperture(wcs.world_to_pixel(slit_coord), r=10)
-                target_aperture.plot(color='blue', lw=4)
-                target_aperture = CircularAperture(wcs.world_to_pixel(targ_coord), r=10)
-                target_aperture.plot(color='k', lw=4)
-                target_aperture = CircularAperture(ref_pix, r=10)
-                target_aperture.plot(color='red', lw=4)
-                plt.show()
+                # mean, med, std = sigma_clipped_stats(target_imgs[i])
+                # wcs = WCS(target_heads[0])
+                # plt.figure()
+                # plt.imshow(target_imgs[0], vmin=mean + 3 * std, vmax=mean + 6 * std)
+                # ref_pix = wcs.world_to_pixel(ref_coord)
+                # for plot_sep in np.linspace(0, sep, 10):
+                #     plot_coord = targ_coord.directional_offset_by(pa, -plot_sep)
+                #     plot_pix = wcs.world_to_pixel(plot_coord)
+                #     plot_aperture = CircularAperture(plot_pix, r=4)
+                #     plot_aperture.plot(color='green', lw=2)
+                # target_aperture = CircularAperture(wcs.world_to_pixel(slit_coord), r=10)
+                # target_aperture.plot(color='blue', lw=4)
+                # target_aperture = CircularAperture(wcs.world_to_pixel(targ_coord), r=10)
+                # target_aperture.plot(color='k', lw=4)
+                # target_aperture = CircularAperture(ref_pix, r=10)
+                # target_aperture.plot(color='red', lw=4)
+                # plt.show()
 
                 # plt.figure()
                 # ax = plt.subplot(projection=wcs)
@@ -649,8 +618,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 #     print(plot_pix)
                 # plt.show()
 
-        print(seps)
-        print(pas)
+        # print(seps)
+        # print(pas)
         sep, pa = np.median(seps), np.median(pas)
         # sep = sep * 0.86
         # pa = pa - 23.5  # 4.3
@@ -662,23 +631,23 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
             target_heads[i]['CRVAL1'] = updated_coord.ra.value
             target_heads[i]['CRVAL2'] = updated_coord.dec.value
 
-            wcs = WCS(target_heads[i])
-            plt.figure()
-            ax = plt.subplot(projection=wcs)
-            mean, med, std = sigma_clipped_stats(target_imgs[i])
-            ax.imshow(target_imgs[i], vmin=mean + 2 * std, vmax=mean + 8 * std)
-            target_pix = wcs.world_to_pixel(targ_coord)
-            target_aperture = CircularAperture(target_pix, r=10)
-            target_aperture.plot(color='blue', lw=4)
-            print(target_pix)
-            for plot_sep in np.linspace(0, sep, 10):
-                plot_coord = targ_coord.directional_offset_by(pa * u.deg, -plot_sep * u.deg)
-                plot_pix = wcs.world_to_pixel(plot_coord)
-                plot_aperture = CircularAperture(plot_pix, r=4)
-                plot_aperture.plot(color='green', lw=2)
-                print(plot_pix)
-            plt.show()
-            continue
+            # wcs = WCS(target_heads[i])
+            # plt.figure()
+            # ax = plt.subplot(projection=wcs)
+            # mean, med, std = sigma_clipped_stats(target_imgs[i])
+            # ax.imshow(target_imgs[i], vmin=mean + 2 * std, vmax=mean + 8 * std)
+            # target_pix = wcs.world_to_pixel(targ_coord)
+            # target_aperture = CircularAperture(target_pix, r=10)
+            # target_aperture.plot(color='blue', lw=4)
+            # print(target_pix)
+            # for plot_sep in np.linspace(0, sep, 10):
+            #     plot_coord = targ_coord.directional_offset_by(pa * u.deg, -plot_sep * u.deg)
+            #     plot_pix = wcs.world_to_pixel(plot_coord)
+            #     plot_aperture = CircularAperture(plot_pix, r=4)
+            #     plot_aperture.plot(color='green', lw=2)
+            #     print(plot_pix)
+            # plt.show()
+            # continue
             #
             # mean, med, std = sigma_clipped_stats(target_imgs[i])
             # plt.figure()
@@ -727,21 +696,21 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
 
         driz.write(f'data/{directory}/redux/combined/{target}.fits.gz')
 
-        fig = plt.figure(figsize=(10, 10))
-        plt.imshow(driz.outsci, origin='lower', vmin=mean-8*std, vmax=mean+90*std)
-        plt.xlim(target_pix[0] - 100, target_pix[0] + 100)
-        plt.ylim(target_pix[1] - 100, target_pix[1] + 100)
-        target_pix = wcs.world_to_pixel(targ_coord)
-        target_aperture = CircularAperture(target_pix, r=10)
-        ap_patches = target_aperture.plot(color='blue', lw=2)
+        # fig = plt.figure(figsize=(10, 10))
+        # plt.imshow(driz.outsci, origin='lower', vmin=mean-8*std, vmax=mean+90*std)
+        # plt.xlim(target_pix[0] - 100, target_pix[0] + 100)
+        # plt.ylim(target_pix[1] - 100, target_pix[1] + 100)
+        # target_pix = wcs.world_to_pixel(targ_coord)
+        # target_aperture = CircularAperture(target_pix, r=10)
+        # ap_patches = target_aperture.plot(color='blue', lw=2)
+        #
+        # plt.show()
 
-        plt.show()
-
-        offset = input('At this point, the aperture should lie right on the target. Do you want to apply a pixel offset?: ')
-        if offset.lower() in ['y', 'yes']:
-            pix_offset = input('What pixel offset would you like to apply?')
-            pix_offset = np.array(pix_offset.split(' '))
-            print(pix_offset)
+        # offset = input('At this point, the aperture should lie right on the target. Do you want to apply a pixel offset?: ')
+        # if offset.lower() in ['y', 'yes']:
+        #     pix_offset = input('What pixel offset would you like to apply?')
+        #     pix_offset = np.array(pix_offset.split(' '))
+        #     print(pix_offset)
 
         # Fine adjustment of WCS
         #try:
@@ -770,9 +739,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         ref_coord = SkyCoord(ra=good_sources['RAJ2000'], dec=good_sources['DEJ2000'], unit=(u.deg, u.deg))
         ref_pix = wcs.world_to_pixel(ref_coord)
 
-        for row in zip(ref_pix[0], ref_pix[1]):
-            print(row)
-
         target_pix = wcs.world_to_pixel(targ_coord)
         target_aperture = CircularAperture(target_pix, r=10)
 
@@ -788,7 +754,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         matches_px = []
         for ind, i in enumerate(ref_pix[0]):
             x, y = (ref_pix[0][ind], ref_pix[1][ind])
-            print(x, y)
             matches_px += [[x, y]]
         if len(matches_px) == 0:
             print(f'Skipping {target}, no reference sources found in catalogue to build WCS')
@@ -910,6 +875,7 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
 
         # positions = SkyCoord(catalog['l'], catalog['b'], frame='galactic')
         target_pix = wcs.world_to_pixel(targ_coord)
+
         aperture_target = CircularAperture(target_pix, r=10)
         ap_stats = ApertureStats(final_im[1].data, aperture_target)
         aperture_target = CircularAperture(ap_stats.centroid, r=10)
@@ -961,9 +927,9 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         good_ids = input('Which ref sources are good and should be used?: ')
         good_ids = np.array(good_ids.split()).astype(int)
 
-        phot_table_target = photutils.aperture_photometry(final_im[1].data, aperture_target,
+        phot_table_target = aperture_photometry(final_im[1].data, aperture_target,
                                                           error=np.sqrt(final_im[2].data))
-        phot_bkg_target = photutils.aperture_photometry(final_im[1].data, annulus_target,
+        phot_bkg_target = aperture_photometry(final_im[1].data, annulus_target,
                                                         error=np.sqrt(final_im[2].data))
 
         target_bkg_sub = phot_table_target[0]['aperture_sum'] - phot_bkg_target[0]['aperture_sum'] \
@@ -972,8 +938,8 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                                      (phot_bkg_target[0]['aperture_sum_err'] /
                                       annulus_target.area * aperture_target.area) ** 2)
 
-        phot_table_UKIDSS = photutils.aperture_photometry(final_im[1].data, aperture_ref, error=final_im[2].data)
-        phot_bkg_UKIDSS = photutils.aperture_photometry(final_im[1].data, annulus_ref, error=final_im[2].data)
+        phot_table_UKIDSS = aperture_photometry(final_im[1].data, aperture_ref, error=final_im[2].data)
+        phot_bkg_UKIDSS = aperture_photometry(final_im[1].data, annulus_ref, error=final_im[2].data)
 
         phot_table_UKIDSS = phot_table_UKIDSS[good_ids]
         phot_bkg_UKIDSS = phot_bkg_UKIDSS[good_ids]
