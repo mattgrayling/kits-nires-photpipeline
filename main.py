@@ -1062,314 +1062,54 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
 
         image = fits.open(f'data/{directory}/redux/combined/{target}.fits.gz')
 
-        # print("Querying Vizier for 2MASS and UKIDSS stars.")
-        # std_cat = query_cat(targ_coord, size=10, catalog=None)
-        # print("Running source finding and catalog matching.")
-        # sources, matches = find_and_match_sources(image[1].data, image[1].header, std_cat, distance_pix=30, plot=True)
-        # print("Performing photometry")
-        # radii = [1, 3, 5, 7, 9, 11, 15]
-        # ap_photo = apPhot(image[1].data, image[1].data, sources, radii=radii)
-        # print("Calculating zeropoint")
-        # # pdb.set_trace()
-        # final_ZP, final_ZP_err = ZPCalculation('K', sources, std_cat, matches, ap_photo, radii, plot=True)
-        #
-        # SN_pix = wcs.world_to_pixel(targ_coord) + np.array([-3, 0])
-        # SN_source = Table([[SN_pix[0]], [SN_pix[1]]], names=['xcentroid', 'ycentroid'])
-        #
-        # ########################################################
-        # fig = plt.figure(figsize=(10, 10))
-        # ax = plt.subplot(projection=wcs)
-        #
-        # # THESE ARE JUST FOR PLOTTING
-        # aperture = CircularAperture(SN_pix, r=7)
-        # annulus = CircularAnnulus(SN_pix, r_in=7 * 1.5, r_out=7 * 3)
-        #
-        # ax.imshow(image[1].data, origin='lower', vmin=mean - 5 * std, vmax=mean + 70 * std)
-        #
-        # ax.set_xlim([SN_pix[0] - 100, SN_pix[0] + 100])
-        # ax.set_ylim([SN_pix[1] - 100, SN_pix[1] + 100])
-        #
-        # ap_patches = aperture.plot(color='white', lw=2)
-        # an_patches = annulus.plot(color='red', lw=2)
-        # plt.tight_layout()
-        # plt.show()
-        # ########################################################
-        #
-        # # SN_phot = apPhot(image[0].data, image[1].data,SN_source, radii = radii)
-        #
-        # # pdb.set_trace()
-        #
-        # SN_phot = apPhot(image[1].data, image[1].data, sources[[int(x) for x in matches[:, 0]]], radii=radii)
-        #
-        # # print(SN_phot)
-        #
-        # mag, emag, limit_3sig_SN, limit_5sig_SN = computeMag(SN_phot, final_ZP, final_ZP_err)
-        #
-        # # print(mag)
-        # # print(emag)
-        # outTable = Table([radii, mag, emag, limit_3sig_SN, limit_5sig_SN],
-        #                  names=['radii_pix', 'mag', 'emag', 'mag_limit_3sig', 'mag_limit_5sig'])
-        # print(outTable)
-        #
-        # continue
+        print("Querying Vizier for 2MASS and UKIDSS stars.")
+        std_cat = query_cat(targ_coord, size=10, catalog=None)
+        print("Running source finding and catalog matching.")
+        sources, matches = find_and_match_sources(image[1].data, image[1].header, std_cat, distance_pix=30, plot=True)
+        print("Performing photometry")
+        radii = [1, 3, 5, 7, 9, 11, 15]
+        ap_photo = apPhot(image[1].data, image[1].data, sources, radii=radii)
+        print("Calculating zeropoint")
+        # pdb.set_trace()
+        final_ZP, final_ZP_err = ZPCalculation('K', sources, std_cat, matches, ap_photo, radii, plot=True)
 
-        Vizier.ROW_LIMIT = -1
-        result = Vizier.query_region(targ_coord, radius=0.05 * u.deg, catalog=["II/246/out", "II/319/las9"])
-        good_tables = []
-        for i, table in enumerate(result):
-            if table.meta['ID'] == 'II_246_out':
-                table = table[(table['Qflg'] == 'AAA') & (table[0]['Bflg'] == '111')]
-            elif table.meta['ID'] == 'II_319_las9':
-                table = table[table['Kmag'] < 20]
-            table = table['RAJ2000', 'DEJ2000']
-            good_tables.append(table)
-        good_sources = vstack([*good_tables])
+        SN_pix = wcs.world_to_pixel(targ_coord) + np.array([-3, 0])
+        SN_source = Table([[SN_pix[0]], [SN_pix[1]]], names=['xcentroid', 'ycentroid'])
 
-        # good2M = result[0][(result[0]['Qflg'] == 'AAA') & (result[0]['Bflg'] == '111')]
-        # good_UKIDSS = result[1][result[1]['Jmag1'] < 19]
-        mean, med, std = sigma_clipped_stats(stacked_img)
-
-        daofind = DAOStarFinder(fwhm=5, threshold=5 * std, sharphi=0.55)
-        sources = daofind(stacked_img - med)
-        sources = sources[sources['flux'] > 1.5]
-        ref_coord = SkyCoord(ra=good_sources['RAJ2000'], dec=good_sources['DEJ2000'], unit=(u.deg, u.deg))
-        ref_pix = wcs.world_to_pixel(ref_coord)
-
-        target_pix = wcs.world_to_pixel(targ_coord)
-        target_aperture = CircularAperture(target_pix, r=10)
-
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.subplot()  # projection=wcs
-        ax.imshow(stacked_img, origin='lower', vmin=median - 3 * std, vmax=median + 3 * std)
-        ap_patches = target_aperture.plot(color='blue', lw=4)
-
-        for i, row in sources.to_pandas().iterrows():
-            source_aperture = CircularAperture((row.xcentroid, row.ycentroid), r=10)
-            source_aperture.plot(color='w', lw=4)
-
-        matches_px = []
-        for ind, i in enumerate(ref_pix[0]):
-            x, y = (ref_pix[0][ind], ref_pix[1][ind])
-            matches_px += [[x, y]]
-        if len(matches_px) == 0:
-            print(f'Skipping {target}, no reference sources found in catalogue to build WCS')
-            continue
-
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.subplot()  # projection=wcs
-        ax.imshow(stacked_img, origin='lower', vmin=median - 3 * std, vmax=median + 3 * std)
-
-        ap_matches = CircularAperture(matches_px, r=10)
-        foo = ap_matches.plot(color='r', lw=1)
-
-        plt.show()
-
-        # Match sources found to UKIDSS
-        matches = []
-        for ind, i in enumerate(ref_pix[0]):
-            if ref_pix[0][ind] < 0 or ref_pix[0][ind] > 1024 or ref_pix[1][ind] < 0 or ref_pix[1][ind] > 1024:
-                continue
-            dist = np.sqrt((np.array(sources['xcentroid']) - ref_pix[0][ind]) ** 2 +
-                           (np.array(sources['ycentroid']) - ref_pix[1][ind]) ** 2)
-            idx = np.argmin(dist)
-            if np.min(dist) < 50:
-                matches += [[idx, ind, np.min(dist)]]
-        if len(matches) == 0:
-            print(f'Skipping {target}, no reference sources found in catalogue to build WCS')
-            continue
-
-        matches = np.array(matches)
-
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.subplot()  # projection=wcs
-
-        ax.imshow(stacked_img, origin='lower', vmin=mean - 3 * std, vmax=mean + 3 * std)
-
-        target_pix = wcs.world_to_pixel(targ_coord)
-        target_aperture = CircularAperture(target_pix, r=10)
-
-        ap_patches = target_aperture.plot(color='blue', lw=2)
-
-        matches_px = []
-        for ind, i in enumerate(matches):
-            x, y = sources[int(i[0])]['xcentroid'], sources[int(i[0])]['ycentroid']
-            matches_px += [[x, y]]
-
-        ap_matches = CircularAperture(matches_px, r=10)
-        foo = ap_matches.plot(color='white', lw=1)
-
-        ###########FIT FOR A NEW WCS
-        new_wcs = fit_wcs_from_points((sources[matches[:, 0].astype('int')]['xcentroid'],
-                                       sources[matches[:, 0].astype('int')]['ycentroid']),
-                                      ref_coord[matches[:, 1].astype('int')], proj_point='center', projection='TAN',
-                                      sip_degree=1)
-        new_header = new_wcs.to_header(relax=True)
-        wcs = new_wcs
-
-        for ext in stack:
-            for j in new_header:
-                ext.header[j] = new_header[j]
-
-        stack.writeto(f'data/{directory}/redux/fixed_astrometry/{target}.fits.gz', overwrite=True)
-        # except:
-        #     print('Error doing astrometry, continuing to next source')
-        #     plt.close('all')
-        #     continue
-
-        final_im = fits.open(f'data/{directory}/redux/fixed_astrometry/{target}.fits.gz')
-
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.subplot(projection=new_wcs)
-
-        ax.imshow(final_im[1].data, origin='lower', vmin=mean - 3 * std, vmax=mean + 8 * std)
-
-        # positions = SkyCoord(catalog['l'], catalog['b'], frame='galactic')
-        SN_pix = new_wcs.world_to_pixel(targ_coord)
-        aperture = CircularAperture(SN_pix, r=10)
-
-        size = 500
-        ax.set_xlim([SN_pix[0] - size, SN_pix[0] + size])
-        ax.set_ylim([SN_pix[1] - size, SN_pix[1] + size])
-
-        ap_patches = aperture.plot(color='blue', lw=2)
-
-        #########PLOT UKIDSS to check
-        ap_UKIDSS = []
-        for i in good_sources:
-            coord = SkyCoord(ra=i['RAJ2000'] * u.deg, dec=i['DEJ2000'] * u.deg)
-            pix = new_wcs.world_to_pixel(coord)
-            fake_ap = CircularAperture(pix, r=10)
-            ap_stats = ApertureStats(final_im[1].data, fake_ap)
-            #     print(pix, ap_stats.centroid)
-            #     print(ap_stats.centroid[0])
-            if ~np.isnan(ap_stats.centroid[0]):
-                ap_UKIDSS += [ap_stats.centroid]
-        #     bad_UKIDSS += [pix]
-        #     ap_UKIDSS += [pix]
-
-        aperture_UKIDSS = CircularAperture(ap_UKIDSS, r=10)
-        # foo = photutils.CircularAperture(bad_UKIDSS, r=10)
-        # annulus_UKIDSS = CircularAnnulus(ap_UKIDSS, r_in=15, r_out = 20)
-
-        foo = aperture_UKIDSS.plot(color='red', lw=1)
-        # foo2 = annulus_UKIDSS.plot(color = 'red', lw = 1)
-
-        # Do photometry-------------------------------
-        result = Vizier.query_region(targ_coord, width="3m", catalog=["II/246/out", "II/319/las9"])
-        good_tables = []
-        for i, table in enumerate(result):
-            if table.meta['ID'] == 'II_246_out':
-                continue
-                table = table[(table['Qflg'] == 'AAA') & (table[0]['Bflg'] == '111')]
-            elif table.meta['ID'] == 'II_319_las9':
-                table = table[table['Kmag'] < 18]
-            table = table['RAJ2000', 'DEJ2000', 'Kmag', 'e_Kmag']
-            good_tables.append(table)
-        good_sources = vstack([*good_tables])
-        # good2M = result[0][(result[0]['Qflg'] == 'AAA') & (result[0]['Bflg'] == '111')]
-        # good_UKIDSS = result[1][result[1]['Kmag'] < 18]
-
-        # positions = SkyCoord(catalog['l'], catalog['b'], frame='galactic')
-        target_pix = wcs.world_to_pixel(targ_coord)
-
-        aperture_target = CircularAperture(target_pix, r=10)
-        ap_stats = ApertureStats(final_im[1].data, aperture_target)
-        aperture_target = CircularAperture(ap_stats.centroid, r=10)
-        annulus_target = CircularAnnulus(ap_stats.centroid, r_in=15, r_out=20)
-
-        ap_ref = []
-        ref_good = []
-        for ind, i in enumerate(good_sources):
-            coord = SkyCoord(ra=i['RAJ2000'] * u.deg, dec=i['DEJ2000'] * u.deg)
-            pix = wcs.world_to_pixel(coord)
-            if pix[0] < 50 or pix[0] > 974 or pix[1] < 50 or pix[1] > 974:  # Skip sources too close to edge
-                continue
-            ref_good.append(ind)
-            fake_ap = CircularAperture(pix, r=10)
-            ap_stats = ApertureStats(final_im[1].data, fake_ap)
-            if ~np.isnan(ap_stats.centroid[0]):
-                ap_ref += [ap_stats.centroid]
-            else:
-                ap_ref += [pix]
-        ref_good = np.array(ref_good)
-
-        aperture_ref = CircularAperture(ap_ref, r=5)
-        annulus_ref = CircularAnnulus(ap_ref, r_in=10, r_out=15)
-
+        ########################################################
         fig = plt.figure(figsize=(10, 10))
         ax = plt.subplot(projection=wcs)
-        ax.imshow(stacked_img, origin='lower', vmin=mean - 3 * std, vmax=mean + 8 * std)
-        ap_patches = aperture_target.plot(color='blue', lw=2)
-        ap_patches = annulus_target.plot(color='red', lw=2)
 
-        aperture_ref.plot(color='white', lw=1)
-        annulus_ref.plot(color='red', lw=1)
-        for i in range(len(aperture_ref)):
-            ax.text(aperture_ref.positions[i][0], aperture_ref.positions[i][1], i, fontsize=18)
+        # THESE ARE JUST FOR PLOTTING
+        aperture = CircularAperture(SN_pix, r=7)
+        annulus = CircularAnnulus(SN_pix, r_in=7 * 1.5, r_out=7 * 3)
 
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.subplot(projection=wcs)
-        ax.imshow(stacked_img, origin='lower', vmin=mean-8*std, vmax=mean+90*std)
-        ap_patches = aperture_target.plot(color='blue', lw=2)
-        ap_patches = annulus_target.plot(color='red', lw=2)
+        ax.imshow(image[1].data, origin='lower', vmin=mean - 5 * std, vmax=mean + 70 * std)
 
-        aperture_ref.plot(color='white', lw=1)
-        annulus_ref.plot(color='red', lw=1)
-        for i in range(len(aperture_ref)):
-            ax.text(aperture_ref.positions[i][0], aperture_ref.positions[i][1], i, fontsize=18)
+        ax.set_xlim([SN_pix[0] - 100, SN_pix[0] + 100])
+        ax.set_ylim([SN_pix[1] - 100, SN_pix[1] + 100])
 
+        ap_patches = aperture.plot(color='white', lw=2)
+        an_patches = annulus.plot(color='red', lw=2)
+        plt.tight_layout()
         plt.show()
+        ########################################################
 
-        good_ids = input('Which ref sources are good and should be used?: ')
-        good_ids = np.array(good_ids.split()).astype(int)
+        # SN_phot = apPhot(image[0].data, image[1].data,SN_source, radii = radii)
 
-        phot_table_target = aperture_photometry(final_im[1].data, aperture_target,
-                                                          error=np.sqrt(final_im[2].data))
-        phot_bkg_target = aperture_photometry(final_im[1].data, annulus_target,
-                                                        error=np.sqrt(final_im[2].data))
+        # pdb.set_trace()
 
-        target_bkg_sub = phot_table_target[0]['aperture_sum'] - phot_bkg_target[0]['aperture_sum'] \
-                         / annulus_target.area * aperture_target.area
-        target_bkg_sub_err = np.sqrt(phot_table_target[0]['aperture_sum_err'] ** 2 +
-                                     (phot_bkg_target[0]['aperture_sum_err'] /
-                                      annulus_target.area * aperture_target.area) ** 2)
+        SN_phot = apPhot(image[1].data, image[1].data, sources[[int(x) for x in matches[:, 0]]], radii=radii)
 
-        phot_table_UKIDSS = aperture_photometry(final_im[1].data, aperture_ref, error=final_im[2].data)
-        phot_bkg_UKIDSS = aperture_photometry(final_im[1].data, annulus_ref, error=final_im[2].data)
+        # print(SN_phot)
 
-        phot_table_UKIDSS = phot_table_UKIDSS[good_ids]
-        phot_bkg_UKIDSS = phot_bkg_UKIDSS[good_ids]
+        mag, emag, limit_3sig_SN, limit_5sig_SN = computeMag(SN_phot, final_ZP, final_ZP_err)
 
-        UKIDSS_bkg_sub = phot_table_UKIDSS['aperture_sum'] - phot_bkg_UKIDSS['aperture_sum'] / \
-                         annulus_ref.area * aperture_ref.area
-
-        UKIDSS_bkg_sub_err = np.sqrt(phot_table_UKIDSS['aperture_sum_err'] ** 2 +
-                                     (phot_bkg_UKIDSS[
-                                          'aperture_sum_err'] / annulus_ref.area * aperture_ref.area) ** 2)
-
-        mags = good_sources[good_ids]['Kmag']
-        mag_err = good_sources[good_ids]['e_Kmag']
-
-        ZP = mags + 2.5 * np.log10(UKIDSS_bkg_sub)
-        ZP_err = np.sqrt(mag_err ** 2 + (2.5 / UKIDSS_bkg_sub / np.log(10) * UKIDSS_bkg_sub_err) ** 2)
-
-        target_mag = -2.5 * np.log10(target_bkg_sub) + ZP
-        target_emag = np.sqrt(ZP_err ** 2 + (2.5 / target_bkg_sub / np.log(10) * target_bkg_sub_err) ** 2)
-
-        target_mag, target_emag = target_mag[~np.isnan(target_mag)], target_emag[~np.isnan(target_mag)]
-
-        av_target_mag = np.average(target_mag, weights=1 / target_emag)
-        av_target_mag_err = np.sqrt(np.cov(target_mag, aweights=1 / target_emag))
-
-        print("K = %f +- %f mag" % (av_target_mag, av_target_mag_err))
-
-        # driz.write(f'data/{directory}/redux/combined/{target}.fits.gz')
-        # fig = plt.figure()
-        # ax = fig.add_subplot(111, projection=new_wcs)
-        # plt.imshow(driz.outsci, vmin=0, vmax=100)
-        # plt.scatter(targ_coord.ra, targ_coord.dec, transform=ax.get_transform('world'), facecolors='none',
-        #             edgecolors='r')
-        # plt.show()
+        # print(mag)
+        # print(emag)
+        outTable = Table([radii, mag, emag, limit_3sig_SN, limit_5sig_SN],
+                         names=['radii_pix', 'mag', 'emag', 'mag_limit_3sig', 'mag_limit_5sig'])
+        print(outTable)
 
 
 reduceNight('20240615', write_flat=False, write_flatten=False, write_bkg=False, write_bkg_sub=False)
