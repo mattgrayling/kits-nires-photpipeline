@@ -643,7 +643,16 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         targ_coord = SkyCoord(f'{target_heads[0]["TARGRA"]} {target_heads[0]["TARGDEC"]}', unit=(u.deg, u.deg))
         targ_coord = SkyCoord("186.441125 12.663525", unit=(u.deg, u.deg))
 
+        print(offsets)
+
+        for i in range(target_imgs.shape[0]):
+            mean, med, std = sigma_clipped_stats(target_imgs[i])
+            plt.figure()
+            plt.imshow(target_imgs[i], vmin=mean - 3 * std, vmax=mean + 3 * std)
+        plt.show()
+
         phot_imgs = target_imgs[(offsets == 0) & ~S1_targets]  # Only use images where source is not on slit for photometry
+        phot_imgs = target_imgs[:8, ...]
         # phot_imgs = target_imgs[:2, ...]
 
         # Measure median pixel value across image for background scale
@@ -655,7 +664,11 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         background_scales = np.array(background_scales)
         #     ratios = background_scales / np.nanmedian(background_scales)
         ###########################CHOICE TO COMBINE TO GET BKG IMAGE
-        bg = np.median(phot_imgs, axis=0)
+        plt.imshow(np.std(phot_imgs, axis=0))
+        plt.show()
+        bg = np.median(phot_imgs[2: 9], axis=0)
+        plt.imshow(bg, vmin=18000, vmax=22000)
+        plt.show()
         #     print(len(phot_imgs))
         #     _,bg,_ = sigma_clipped_stats(phot_imgs, axis = 0, sigma = 5)
         #     _,bg,_ = sigma_clipped_stats(all_imgs, axis = 0, sigma = 5)
@@ -1059,8 +1072,24 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         #     pix_offset = np.array(pix_offset.split(' '))
         #     print(pix_offset)
 
+        stack = fits.open(f'data/{directory}/redux/combined/{target}.fits.gz')
+        stacked_img = stack[1].data
 
-        image = fits.open(f'data/{directory}/redux/combined/{target}.fits.gz')
+        aperture_target = CircularAperture(target_pix, r=10)
+        ap_stats = ApertureStats(stack[1].data, aperture_target)
+        aperture_target = CircularAperture(ap_stats.centroid, r=10)
+        annulus_target = CircularAnnulus(ap_stats.centroid, r_in=15, r_out=20)
+
+        phot_table_target = aperture_photometry(stacked_img, aperture_target,
+                                                error=np.sqrt(stacked_img))
+        phot_bkg_target = aperture_photometry(stacked_img, annulus_target,
+                                              error=np.sqrt(stacked_img))
+
+        target_bkg_sub = phot_table_target[0]['aperture_sum'] - phot_bkg_target[0]['aperture_sum'] \
+                         / annulus_target.area * aperture_target.area
+        target_bkg_sub_err = np.sqrt(phot_table_target[0]['aperture_sum_err'] ** 2 +
+                                     (phot_bkg_target[0]['aperture_sum_err'] /
+                                      annulus_target.area * aperture_target.area) ** 2)
 
         # print("Querying Vizier for 2MASS and UKIDSS stars.")
         # std_cat = query_cat(targ_coord, size=10, catalog=None)
@@ -1206,6 +1235,16 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         new_header = new_wcs.to_header(relax=True)
         wcs = new_wcs
 
+        fig = plt.figure(figsize=(10, 10))
+        plt.imshow(driz.outsci, origin='lower', vmin=mean - 8 * std, vmax=mean + 90 * std)
+        plt.xlim(target_pix[0] - 100, target_pix[0] + 100)
+        plt.ylim(target_pix[1] - 100, target_pix[1] + 100)
+        target_pix = wcs.world_to_pixel(targ_coord)
+        target_aperture = CircularAperture(target_pix, r=10)
+        ap_patches = target_aperture.plot(color='blue', lw=2)
+
+        plt.show()
+
         for ext in stack:
             for j in new_header:
                 ext.header[j] = new_header[j]
@@ -1272,11 +1311,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         # positions = SkyCoord(catalog['l'], catalog['b'], frame='galactic')
         target_pix = wcs.world_to_pixel(targ_coord)
 
-        aperture_target = CircularAperture(target_pix, r=10)
-        ap_stats = ApertureStats(final_im[1].data, aperture_target)
-        aperture_target = CircularAperture(ap_stats.centroid, r=10)
-        annulus_target = CircularAnnulus(ap_stats.centroid, r_in=15, r_out=20)
-
         ap_ref = []
         ref_good = []
         for ind, i in enumerate(good_sources):
@@ -1322,17 +1356,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
 
         good_ids = input('Which ref sources are good and should be used?: ')
         good_ids = np.array(good_ids.split()).astype(int)
-
-        phot_table_target = aperture_photometry(final_im[1].data, aperture_target,
-                                                          error=np.sqrt(final_im[2].data))
-        phot_bkg_target = aperture_photometry(final_im[1].data, annulus_target,
-                                                        error=np.sqrt(final_im[2].data))
-
-        target_bkg_sub = phot_table_target[0]['aperture_sum'] - phot_bkg_target[0]['aperture_sum'] \
-                         / annulus_target.area * aperture_target.area
-        target_bkg_sub_err = np.sqrt(phot_table_target[0]['aperture_sum_err'] ** 2 +
-                                     (phot_bkg_target[0]['aperture_sum_err'] /
-                                      annulus_target.area * aperture_target.area) ** 2)
 
         phot_table_UKIDSS = aperture_photometry(final_im[1].data, aperture_ref, error=final_im[2].data)
         phot_bkg_UKIDSS = aperture_photometry(final_im[1].data, annulus_ref, error=final_im[2].data)
