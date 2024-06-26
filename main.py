@@ -598,9 +598,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
             start = start + 6
             target_inds[:7] = False
         target_imgs = all_imgs[target_inds, ...]
-        # ---
-        target_imgs = np.r_[target_imgs[12:], target_imgs[:12]]
-        # ---
         # for i in range(target_imgs.shape[0]):
         #     mean, med, std = sigma_clipped_stats(target_imgs[i])
         #     plt.figure()
@@ -609,9 +606,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
         # return
         # target_imgs = target_imgs[2:, ...]
         target_heads = all_heads[start: stop + 1]
-        # ---
-        target_heads = target_heads[12:] + target_heads[:12]
-        # ---
         targets = all_targets[target_inds]
         bad = input('Are there any bad images you want to drop?: ')
         bad = np.array(bad.split()).astype(int)
@@ -641,7 +635,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
             offsets[i] = head['XOFFSET'] + head['YOFFSET']
 
         targ_coord = SkyCoord(f'{target_heads[0]["TARGRA"]} {target_heads[0]["TARGDEC"]}', unit=(u.deg, u.deg))
-        targ_coord = SkyCoord("186.441125 12.663525", unit=(u.deg, u.deg))
 
         phot_imgs = target_imgs[(offsets == 0) & ~S1_targets]  # Only use images where source is not on slit for photometry
         # phot_imgs = target_imgs[:2, ...]
@@ -685,9 +678,6 @@ def reduceNight(directory, write_flat=True, write_bkg=True,
                 hdu.writeto(f'data/{directory}/redux/bkg_sub_{outname}', overwrite=True)
 
         # #############combine image###############
-
-        S1_targets = np.array([False, False, False, False, False, False, False, False, False,
-                               True, True, True, True, True, True, True, True])
 
         if S1_targets.sum() > 0:  # Need additional WCS care in this case
             ref_image = target_imgs[0, ...]
